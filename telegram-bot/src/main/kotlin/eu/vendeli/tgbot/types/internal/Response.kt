@@ -34,6 +34,14 @@ inline fun <T> Response<T>.onFailure(block: (Response.Failure) -> Unit): T? = wh
     }
 }
 
+inline fun <T> Response<T>.onSuccess(block: (Response.Success<T>) -> Unit): Response<T> {
+    when (this) {
+        is Response.Success<T> -> block(this)
+        is Response.Failure -> {}
+    }
+    return this
+}
+
 fun <T> Response<T>.isSuccess(): Boolean = this is Response.Success
 fun <T> Response<T>.getOrNull(): T? = when (this) {
     is Response.Success<T> -> result

@@ -35,24 +35,38 @@ internal object TelegramActionsCollector {
         val unhandleds = mutableListOf<Invocation>()
 
         getMethodsAnnotatedWith(CommandHandler::class.java).forEach { m ->
-            (m.annotations.find { it is CommandHandler } as CommandHandler).value.forEach { v ->
-                commands[v] = Invocation(
-                    clazz = m.declaringClass, method = m, namedParameters = m.parameters.getParameters()
-                )
+            (m.annotations.find { it is CommandHandler } as CommandHandler).let {
+                it.value.forEach { v ->
+                    commands[v] = Invocation(
+                        clazz = m.declaringClass,
+                        method = m,
+                        namedParameters = m.parameters.getParameters(),
+                        cooldown = it.cooldown,
+                        ignoreCooldown = it.ignoreCooldown
+                    )
+                }
             }
         }
 
         getMethodsAnnotatedWith(InputHandler::class.java).forEach { m ->
             (m.annotations.find { it is InputHandler } as InputHandler).value.forEach { v ->
                 inputs[v] = Invocation(
-                    clazz = m.declaringClass, method = m, namedParameters = m.parameters.getParameters()
+                    clazz = m.declaringClass,
+                    method = m,
+                    namedParameters = m.parameters.getParameters()
                 )
             }
         }
 
         getMethodsAnnotatedWith(UnprocessedHandler::class.java).forEach { m ->
+            val anno = (m.annotations.find { it is UnprocessedHandler } as UnprocessedHandler)
             unhandleds.add(Invocation(
-                clazz = m.declaringClass, method = m, namedParameters = m.parameters.getParameters()
+                clazz = m.declaringClass,
+                method = m,
+                namedParameters = m.parameters.getParameters(),
+                priority = anno.priority,
+                ignoreCancelled = anno.ignoreCancelled,
+                isAsync = anno.isAsync
             ))
         }
 

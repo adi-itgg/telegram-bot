@@ -42,6 +42,8 @@ import kotlinx.coroutines.Deferred
 import kotlinx.coroutines.async
 import kotlinx.coroutines.coroutineScope
 import org.slf4j.LoggerFactory
+import kotlin.coroutines.CoroutineContext
+import kotlin.coroutines.coroutineContext
 
 /**
  * Telegram bot main instance
@@ -72,6 +74,8 @@ class TelegramBot(
     private fun TgMethod.toUrl() = TELEGRAM_API_URL_PATTERN.format(apiHost, token) + name
 
     internal val magicObjects = mutableMapOf<Class<*>, MagicObject<*>>()
+
+    internal lateinit var defaultContext: CoroutineContext
 
     /**
      * to disable http request logging
@@ -231,6 +235,7 @@ class TelegramBot(
      * Note that when using this method, other processing will be interrupted and reassigned.
      */
     suspend fun handleUpdates() {
+        defaultContext = coroutineContext
         update.setListener {
             handle(it)
         }
@@ -244,6 +249,7 @@ class TelegramBot(
      * @param block [ManualHandlingDsl]
      */
     suspend fun handleUpdates(block: suspend ManualHandlingDsl.() -> Unit) {
+        defaultContext = coroutineContext
         update.setListener {
             handle(it, block)
         }
@@ -277,7 +283,8 @@ class TelegramBot(
         innerType: Class<I>? = null,
     ): Deferred<Response<out T>> = async {
         val jsonResponse = mapper.readTree(response?.bodyAsText() ?: "")
-        logger.debug("Response: ${jsonResponse.toPrettyString()}")
+        if (httpLogLevel == HttpLogLevel.BODY && !disableHttpLogs)
+            logger.debug("Response: ${jsonResponse.toPrettyString()}")
 
         if (jsonResponse["ok"].asBoolean()) mapper.convertSuccessResponse(jsonResponse, returnType, innerType)
         else mapper.convertValue(jsonResponse, Response.Failure::class.java)
@@ -384,9 +391,6 @@ class TelegramBot(
     internal suspend fun pullUpdates(offset: Int? = null): List<Update>? {
         logger.trace("Pulling updates.")
         val res = botHttpRequest(TgMethod("getUpdates").toUrl() + (offset?.let { "?offset=$it" } ?: ""), HttpMethod.Post) ?: return null
-//        val request = httpClient.post(
-//            TgMethod("getUpdates").toUrl() + (offset?.let { "?offset=$it" } ?: "")
-//        )
         return mapper.readValue(res.bodyAsText(), jacksonTypeRef<Response<List<Update>>>()).getOrNull()
     }
 

@@ -3,6 +3,7 @@ package eu.vendeli
 import eu.vendeli.tgbot.annotations.CommandHandler
 import eu.vendeli.tgbot.annotations.InputHandler
 import eu.vendeli.tgbot.annotations.UnprocessedHandler
+import eu.vendeli.tgbot.enums.MethodPriority
 
 class TgAnnotationsModel {
 
@@ -39,11 +40,11 @@ object TestObj {
 
 class tgUnprocessedHandleModel {
 
-    @UnprocessedHandler
+    @UnprocessedHandler(priority = MethodPriority.LOW)
     fun test1() {
     }
 
-    @UnprocessedHandler
+    @UnprocessedHandler(priority = MethodPriority.HIGHEST)
     fun test2() {
     }
 

@@ -8,5 +8,7 @@ package eu.vendeli.tgbot.annotations
 @Target(AnnotationTarget.FUNCTION)
 @Retention(AnnotationRetention.RUNTIME)
 annotation class CommandHandler(
-    val value: Array<String>
+    val value: Array<String>,
+    val cooldown: Long = 0,
+    val ignoreCooldown: Boolean = false
 )

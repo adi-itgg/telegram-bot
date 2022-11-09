@@ -3,8 +3,12 @@ package eu.vendeli.tgbot.core
 import com.fasterxml.jackson.module.kotlin.jacksonTypeRef
 import eu.vendeli.tgbot.TelegramBot
 import eu.vendeli.tgbot.TelegramBot.Companion.mapper
+import eu.vendeli.tgbot.api.deleteMessage
+import eu.vendeli.tgbot.enums.MethodPriority
+import eu.vendeli.tgbot.events.EventUpdate
 import eu.vendeli.tgbot.interfaces.BotInputListener
 import eu.vendeli.tgbot.interfaces.ClassManager
+import eu.vendeli.tgbot.interfaces.Event
 import eu.vendeli.tgbot.types.Update
 import eu.vendeli.tgbot.types.internal.*
 import eu.vendeli.tgbot.utils.CreateNewCoroutineContext
@@ -30,10 +34,12 @@ class TelegramUpdateHandler internal constructor(
     private val classManager: ClassManager,
     private val inputListener: BotInputListener,
 ) {
-    private val logger = LoggerFactory.getLogger(this::class.java)
+    private val logger = LoggerFactory.getLogger(this::class.java.simpleName)
     private lateinit var listener: suspend TelegramUpdateHandler.(Update) -> Unit
     private var handlerActive: Boolean = false
     private val manualHandlingBehavior by lazy { ManualHandlingDsl(bot, inputListener) }
+
+    private val cooldowns = mutableMapOf<Long, Long>()
 
     /**
      * Function that starts the listening event.
@@ -48,7 +54,7 @@ class TelegramUpdateHandler internal constructor(
         }
         var lastUpdateId: Int = offset ?: 0
         bot.pullUpdates(offset)?.forEach {
-            CreateNewCoroutineContext(coroutineContext).launch(Dispatchers.IO) {
+            CreateNewCoroutineContext(coroutineContext).launch(bot.defaultContext) {
                 listener(this@TelegramUpdateHandler, it)
             }
             lastUpdateId = it.updateId + 1
@@ -145,16 +151,17 @@ class TelegramUpdateHandler internal constructor(
     /**
      * Function used to call functions with certain parameters processed after receiving update.
      *
-     * @param update
+     * @param event
      * @param invocation
      * @param parameters
      * @return null on success or [Throwable].
      */
     private suspend fun invokeMethod(
-        update: ProcessedUpdate,
+        event: Event,
         invocation: Invocation,
         parameters: Map<String, String>,
     ): Throwable? {
+        val update = event.update
         var isSuspend = false
         logger.trace("Parsing arguments for Update#${update.fullUpdate.updateId}")
         val processedParameters = buildList {
@@ -177,6 +184,7 @@ class TelegramUpdateHandler internal constructor(
                     typeName == "eu.vendeli.tgbot.types.User" -> add(update.user)
                     typeName == "eu.vendeli.tgbot.TelegramBot" -> add(bot)
                     typeName == "eu.vendeli.tgbot.types.internal.ProcessedUpdate" -> add(update)
+                    typeName == "eu.vendeli.tgbot.interfaces.Event" -> add(event)
                     bot.magicObjects.contains(p.type) -> add(bot.magicObjects[p.type]?.get(update, bot))
                     else -> add(null)
                 }
@@ -194,12 +202,25 @@ class TelegramUpdateHandler internal constructor(
 
         logger.trace("Invoking function for Update#${update.fullUpdate.updateId}")
         invocation.runCatching {
-            if (isSuspend) method.invokeSuspend(classManager.getInstance(clazz), *processedParameters.toTypedArray())
+            if (!invocation.ignoreCooldown && event.isCooldown) {
+                logger.debug("User#${event.user.id} command is cooldown ${event.fullUpdate.message?.text ?: invocation}")
+                val chatId = update.fullUpdate.message?.chat?.id ?: update.fullUpdate.callbackQuery?.message?.chat?.id ?: update.user.id
+                if (chatId < 0)
+                    deleteMessage(update.fullUpdate.message?.messageId ?: return null).send(chatId, bot)
+                return null
+            }
+            if (isSuspend)
+                if (invocation.isAsync)
+                    CreateNewCoroutineContext(coroutineContext).launch {
+                        method.invokeSuspend(classManager.getInstance(clazz), *processedParameters.toTypedArray())
+                    }
+                else
+                    method.invokeSuspend(classManager.getInstance(clazz), *processedParameters.toTypedArray())
             else method.invoke(classManager.getInstance(clazz), *processedParameters.toTypedArray())
         }.onFailure {
             logger.debug("Method {$invocation} invocation error at handling update: $update", it)
             return it
-        }.onSuccess { logger.debug("Handled update#${update.fullUpdate.updateId} to method $invocation") }
+        }.onSuccess { logger.debug("Handled update#${update.fullUpdate.updateId} to method ${invocation.clazz.simpleName}::${invocation.method.name}") }
         return null
     }
 
@@ -211,6 +232,7 @@ class TelegramUpdateHandler internal constructor(
      */
     suspend fun handle(update: Update): Throwable? = processUpdateDto(update).run {
         logger.trace("Handling update: $update")
+        logger.debug("Handling update user ${update.message?.from?.firstName} - text: ${update.message?.text}")
         val commandAction = text?.run {
             // to fix command not detected if text contains @ like /rules@bot
             findAction(if (contains("@"))
@@ -224,21 +246,45 @@ class TelegramUpdateHandler internal constructor(
         logger.trace("Result of finding action - command: $commandAction, input: $inputAction")
         inputListener.delAsync(user.id).await()
 
+        val event = EventUpdate(bot, this)
+
         return when {
-            commandAction != null -> invokeMethod(this, commandAction.invocation, commandAction.parameters)
+            commandAction != null -> commandAction.run {
+                event._isCooldown = cooldowns[user.id]?.let { date ->
+                    if ((System.currentTimeMillis() - date) > invocation.cooldown) {
+                        cooldowns[user.id] = System.currentTimeMillis()
+                        false
+                    } else true
+                } ?: run {
+                    cooldowns[user.id] = System.currentTimeMillis()
+                    false
+                }
+                invokeMethod(event, invocation, parameters)
+            }
             inputAction != null && update.message?.from?.isBot == false -> invokeMethod(
-                this, inputAction.invocation, inputAction.parameters
+                event = event,
+                invocation = inputAction.invocation,
+                parameters = inputAction.parameters
             )
 
             actions?.unhandled?.isNotEmpty() == true -> {
-                actions.unhandled.forEach {
-                    invokeMethod(this, it, emptyMap())
+                MethodPriority.values().sortedArrayDescending().forEach { priority ->
+                    actions.unhandled.filter {
+                        it.priority == priority
+                    }.forEach {
+                        if (!event.isCancelled || it.ignoreCancelled)
+                            invokeMethod(event, it, emptyMap())
+                        else
+                            logger.debug("Cancelled update#${event.fullUpdate.updateId} to method ${it.clazz.simpleName}::${it.method.name}")
+                    }
                 }
+                if (!event.isHandled && !event.isCancelled)
+                    logger.info("update: ${update.updateId} not handled.")
                 null
             }
 
             else -> {
-                logger.info("update: $update not handled.")
+                logger.info("update: ${update.updateId} not handled.")
                 null
             }
         }
